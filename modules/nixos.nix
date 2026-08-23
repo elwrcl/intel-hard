@@ -7,6 +7,7 @@
 
 let
   cfg = config.programs.intel-hard;
+  topology = import ../topology.nix (lib.optionalAttrs (cfg.root != null) { root = cfg.root; });
 
   graphics = import ../graphics;
   compute = import ../compute;
@@ -78,7 +79,6 @@ let
     export RUSTICL_ENABLE="${cfg.opencl.rusticlDrivers}"
   '';
 
-  # with no arguments drop into a shell carrying the environment.
   run = ''
     if [ $# -eq 0 ]; then
       exec "''${SHELL:-${pkgs.bashInteractive}/bin/bash}"
@@ -92,9 +92,17 @@ in
   options.programs.intel-hard = {
     enable = lib.mkEnableOption "the locally built gen7 (Ivy Bridge) drivers";
 
+    root = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/mnt/HDD/linuxdata/Projects/Drivers";
+      description = "Directory holding the driver trees. Null uses topology.nix's default.";
+    };
+
     buildRoot = lib.mkOption {
       type = lib.types.str;
-      example = "/mnt/HDD/linuxdata/Projects/Drivers/intel-hard-graphics/build";
+      default = topology.driver.build;
+      defaultText = "topology.driver.build";
       description = "Meson build directory of the mesa fork.";
     };
 
@@ -118,8 +126,8 @@ in
 
     opencl.clvkBuildRoot = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "/mnt/HDD/linuxdata/Projects/Drivers/clvk/build";
+      default = topology.clvk.build;
+      defaultText = "topology.clvk.build";
       description = "clvk build directory, or null to leave clvk out.";
     };
 

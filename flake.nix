@@ -9,6 +9,7 @@
       nixosModules.intel-hard = ./modules/nixos.nix;
 
       lib = {
+        topology = import ./topology.nix;
         graphics = import ./graphics;
         compute = import ./compute;
         video = import ./video;
