@@ -13,6 +13,7 @@
         graphics = import ./graphics;
         compute = import ./compute;
         video = import ./video;
+        d3d = import ./d3d;
         runtimeLibs = import ./lib/runtime-libs.nix;
       };
     };

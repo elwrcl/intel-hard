@@ -11,11 +11,14 @@ let
 
   graphics = import ../graphics;
   compute = import ../compute;
+  d3d = import ../d3d;
 
   runtimeLibPath = lib.makeLibraryPath (import ../lib/runtime-libs.nix pkgs);
 
   vk = graphics.${cfg.vulkan.driver};
   rusticl = compute.rusticl;
+  nine = d3d.nine;
+
 
   prelude = ''
     if [ ! -d "${cfg.buildRoot}" ]; then
@@ -26,14 +29,24 @@ let
     export LD_LIBRARY_PATH="${runtimeLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   '';
 
+  # The loader accepts several ICDs and picks the one matching the client's
+  # architecture, so a 32-bit build can simply be appended.
   vulkanEnv = ''
-    _icd="${cfg.buildRoot}/${vk.icd}"
-    if [ ! -f "$_icd" ]; then
-      echo "intel-hard: ${cfg.vulkan.driver} ICD not found: $_icd" >&2
+    _icds="${cfg.buildRoot}/${vk.icd}"
+    if [ ! -f "$_icds" ]; then
+      echo "intel-hard: ${cfg.vulkan.driver} ICD not found: $_icds" >&2
       exit 1
     fi
-    export VK_DRIVER_FILES="$_icd"
-    export VK_ICD_FILENAMES="$_icd"
+  ''
+  + lib.optionalString (cfg.vulkan.buildRoot32 != null) ''
+    _icd32="${cfg.vulkan.buildRoot32}/${vk.icd32}"
+    if [ -f "$_icd32" ]; then
+      _icds="$_icds:$_icd32"
+    fi
+  ''
+  + ''
+    export VK_DRIVER_FILES="$_icds"
+    export VK_ICD_FILENAMES="$_icds"
     export MESA_VK_DEVICE_SELECT="${cfg.pciId}"
 
     # A system-wide MESA_GL_VERSION_OVERRIDE=4.6 lies about the GL version.
@@ -47,11 +60,18 @@ let
     _rusticl="${cfg.buildRoot}/${rusticl.icd}"
     if [ -f "$_rusticl" ]; then
       ln -sf "$_rusticl" "$_vendors/rusticl.icd"
-      # rusticl.icd names a soname, not a path.
+      # rusticl.icd names a soname, not a path, so both builds can share the
+      # one .icd file: ld.so walks LD_LIBRARY_PATH and skips the library whose
+      # architecture does not match the client.
       export LD_LIBRARY_PATH="${cfg.buildRoot}/${rusticl.libraryDir}:$LD_LIBRARY_PATH"
     else
       rm -f "$_vendors/rusticl.icd"
       echo "intel-hard: rusticl.icd not found: $_rusticl" >&2
+    fi
+  ''
+  + lib.optionalString (cfg.vulkan.buildRoot32 != null) ''
+    if [ -d "${cfg.vulkan.buildRoot32}/${rusticl.libraryDir}" ]; then
+      export LD_LIBRARY_PATH="${cfg.vulkan.buildRoot32}/${rusticl.libraryDir}:$LD_LIBRARY_PATH"
     fi
   ''
   + lib.optionalString (cfg.opencl.clvkBuildRoot != null) ''
@@ -77,6 +97,39 @@ let
     export OCL_ICD_VENDORS="$_vendors"
     export OCL_ICD_ASSUME_ICD_EXTENSION=1
     export RUSTICL_ENABLE="${cfg.opencl.rusticlDrivers}"
+  '';
+
+  # wine's d3d9 loader takes a *directory*, and looks for a file literally
+  # named d3dadapter9.so.1 inside it. meson leaves the versioned name in the
+  # build tree, so point the loader at a directory of symlinks.
+  #
+  # 32- and 64-bit nine cannot share one directory: both want that same file
+  # name. They get one each, and both go on D3D_MODULE_PATH -- wine walks the
+  # list and skips what it cannot dlopen, so a 32-bit process lands on the
+  # 32-bit build and a 64-bit one on the 64-bit build.
+  d3dLink = suffix: root: ''
+    _nine="${root}/${nine.library}"
+    if [ -f "$_nine" ]; then
+      mkdir -p "$_d3d/${suffix}"
+      ln -sf "$_nine" "$_d3d/${suffix}/${nine.soname}"
+      _d3d_paths="''${_d3d_paths:+$_d3d_paths:}$_d3d/${suffix}"
+    fi
+  '';
+
+  d3dEnv = ''
+    _d3d="''${XDG_RUNTIME_DIR:-/tmp}/intel-hard/d3d"
+    _d3d_paths=
+  ''
+  + lib.optionalString (cfg.d3d.buildRoot != null) (d3dLink "64" cfg.d3d.buildRoot)
+  + lib.optionalString (cfg.d3d.buildRoot32 != null) (d3dLink "32" cfg.d3d.buildRoot32)
+  + ''
+    if [ -z "$_d3d_paths" ]; then
+      echo "intel-hard: gallium nine not found" >&2
+      echo "  build mesa with -Dgallium-nine=true -Dgallium-drivers=crocus,softpipe -Dglx=dri" >&2
+      echo "  then set programs.intel-hard.d3d.buildRoot (and .buildRoot32)" >&2
+      exit 1
+    fi
+    export D3D_MODULE_PATH="$_d3d_paths"
   '';
 
   run = ''
@@ -118,6 +171,38 @@ in
       description = "Which hasvk ICD the Vulkan wrappers select.";
     };
 
+    vulkan.buildRoot32 = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = topology.driver.build32;
+      defaultText = "topology.driver.build32";
+      description = ''
+        Meson build directory of the 32-bit driver, or null to leave it out.
+        Its ICD is appended to VK_DRIVER_FILES; the loader hands each client
+        the ICD matching its own architecture.
+      '';
+    };
+
+    d3d.buildRoot = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = topology.driver.buildNine;
+      defaultText = "topology.driver.buildNine";
+      description = ''
+        Meson build directory holding the 64-bit gallium nine, or null to
+        leave it out. Nine needs softpipe and glx=dri, which the hasvk build
+        does not enable, so it sits in a build directory of its own.
+      '';
+    };
+
+    d3d.buildRoot32 = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = topology.driver.build32Nine;
+      defaultText = "topology.driver.build32Nine";
+      description = ''
+        Same, for the 32-bit nine. Most D3D9 titles are 32-bit, so this is
+        usually the one that matters.
+      '';
+    };
+
     opencl.rusticlDrivers = lib.mkOption {
       type = lib.types.str;
       default = "crocus";
@@ -140,17 +225,19 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [
-      (wrapper "ivb" (vulkanEnv + openclEnv))
+      (wrapper "ivb" (vulkanEnv + openclEnv + d3dEnv))
       (wrapper "ivb-vk" vulkanEnv)
       (wrapper "ivb-cl" (lib.optionalString (cfg.opencl.clvkBuildRoot != null) vulkanEnv + openclEnv))
+      (wrapper "ivb-d3d" d3dEnv)
 
       (pkgs.writeShellScriptBin "ivb-env" (
         prelude
         + vulkanEnv
         + openclEnv
+        + d3dEnv
         + ''
           for v in VK_DRIVER_FILES MESA_VK_DEVICE_SELECT OCL_ICD_VENDORS \
-                   RUSTICL_ENABLE LD_LIBRARY_PATH; do
+                   RUSTICL_ENABLE D3D_MODULE_PATH LD_LIBRARY_PATH; do
             printf '%s=%s\n' "$v" "''${!v-}"
           done
           echo

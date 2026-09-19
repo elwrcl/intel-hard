@@ -1,5 +1,5 @@
 {
-  root ? "/mnt/HDD/linuxdata/Projects/Drivers",
+  root ? "/mnt/HDD/linuxdata/Projects_XFS/Drivers",
 }:
 
 rec {
@@ -14,7 +14,15 @@ rec {
 
   driver = rec {
     src = "${root}/${names.driver}";
+
+    # hasvk + rusticl
     build = "${src}/build";
+    build32 = "${src}/build32";
+
+    # gallium nine wants softpipe and glx=dri, which the build above does
+    # not enable, so it gets meson directories of its own.
+    buildNine = "${src}/build-nine";
+    build32Nine = "${src}/build32-nine";
   };
 
   clvk = rec {
